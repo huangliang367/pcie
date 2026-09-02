@@ -1,3 +1,6 @@
 .vscode-targs
 build/
 images/
+debian-build/rootfs/
+debian-build/images/
+.vscode/
