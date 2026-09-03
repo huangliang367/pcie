@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNEL_DIR="$ROOT_DIR/linux-6.1.183"
 BUILD_DIR="$ROOT_DIR/build/kernel"
 ROOTFS_IMG="$ROOT_DIR/debian-build/images/debian-arm64.ext4"
+QEMU=${ROOT_DIR}/qemu/build/qemu-system-aarch64
 
 export ARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
@@ -119,7 +120,7 @@ do_run() {
         echo "error: $image not found. Run: $0 bkernel" >&2
         exit 1
     fi
-    qemu-system-aarch64 \
+    ${QEMU} \
         -machine virt \
         -cpu cortex-a72 \
         -smp 4 \
