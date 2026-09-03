@@ -127,10 +127,12 @@ do_run() {
         -m 2G \
         -nographic \
         -kernel "$image" \
-		-append "console=ttyAMA0 root=/dev/vda rw" \
-		-drive if=none,file="$ROOTFS_IMG",format=raw,id=hd0 \
-		-device virtio-blk-pci,drive=hd0 \
-		-device demo-pcie-ep
+        -append "console=ttyAMA0 root=/dev/vda rw net.ifnames=0" \
+        -drive if=none,file="$ROOTFS_IMG",format=raw,id=hd0 \
+        -netdev user,id=net0 \
+        -device virtio-net-pci,netdev=net0 \
+        -device virtio-blk-pci,drive=hd0 \
+        -device demo-pcie-ep
 }
 
 [ $# -eq 1 ] || usage
