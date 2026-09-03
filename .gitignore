@@ -1,6 +1,8 @@
-.vscode-targs
+.vscode-ctags/
 build/
 images/
 debian-build/rootfs/
 debian-build/images/
 .vscode/
+qemu/.vscode-ctags
+.deepseek/

@@ -129,7 +129,8 @@ do_run() {
         -kernel "$image" \
 		-append "console=ttyAMA0 root=/dev/vda rw" \
 		-drive if=none,file="$ROOTFS_IMG",format=raw,id=hd0 \
-		-device virtio-blk-pci,drive=hd0
+		-device virtio-blk-pci,drive=hd0 \
+		-device demo-pcie-ep
 }
 
 [ $# -eq 1 ] || usage
@@ -141,3 +142,14 @@ case "$1" in
     urootfs) do_urootfs ;;
     *)       usage ;;
 esac
+
+
+
+# mkdir build
+# cd build
+
+# ../configure \
+#     --target-list=aarch64-softmmu \
+#     --enable-debug
+
+# make -j$(nproc)
