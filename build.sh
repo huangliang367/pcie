@@ -1,6 +1,6 @@
 #!/bin/bash
 # build.sh — kernel config / build / QEMU run helper
-# Usage: ./build.sh {kconfig|kernel|run|urootfs}
+# Usage: ./build.sh {kconfig|kernel|modules|run|urootfs}
 
 set -euo pipefail
 
@@ -15,12 +15,13 @@ export CROSS_COMPILE=aarch64-linux-gnu-
 
 usage() {
     cat <<USAGE
-Usage: $0 {kconfig|kernel|run|urootfs}
+Usage: $0 {kconfig|kernel|modules|run|urootfs}
 
   kconfig   Configure the kernel (menuconfig). Output dir: $BUILD_DIR
   bkernel   Build the kernel. Artifacts go to $BUILD_DIR
   run       Boot the built kernel in QEMU (virt machine)
   urootfs   Sync debian-build/rootfs into the ext4 rootfs image
+  modules   Build drivers under modules/, artifacts -> build/modules/
 USAGE
     exit 1
 }
@@ -66,6 +67,57 @@ do_bkernel() {
         modules_install
 
     echo "[bkernel] done: $BUILD_DIR/arch/arm64/boot/Image"
+}
+
+do_bmodules() {
+    local modules_dir="$ROOT_DIR/modules"
+    local out_root="$ROOT_DIR/build/modules"
+
+    if [ ! -f "$BUILD_DIR/.config" ]; then
+        echo "error: $BUILD_DIR/.config not found. Run: $0 kconfig" >&2
+        exit 1
+    fi
+
+    mkdir -p "$out_root"
+
+    local m count=0
+    for m in "$modules_dir"/*/; do
+        [ -d "$m" ] || continue
+        if [ ! -f "${m}Makefile" ]; then
+            echo "[modules] skip $(basename "$m"): no Makefile"
+            continue
+        fi
+
+        local name out_dir
+        name="$(basename "$m")"
+        out_dir="$out_root/$name"
+
+        # kbuild 没有 out-of-source 机制(M= 目录即产物目录),
+        # 在 build/modules/<name>/ 里用符号链接指向源码,
+        # 全部编译产物落在 build 目录,源码目录保持干净
+        rm -rf "$out_dir"
+        mkdir -p "$out_dir"
+        find "$m" -maxdepth 1 -type f \
+            \( -name '*.c' -o -name '*.h' -o -name 'Makefile' -o -name 'Kbuild' \) \
+            -exec ln -s {} "$out_dir/" \;
+
+        echo "[modules] building $name (out: $out_dir)..."
+        make -C "$KERNEL_DIR" \
+            O="$BUILD_DIR" \
+            M="$out_dir" \
+            -j"$(nproc)" \
+            modules
+
+        local ko
+        for ko in "$out_dir"/*.ko; do
+            [ -f "$ko" ] || continue
+            cp "$ko" "$out_root/"
+            echo "[modules] $(basename "$ko") -> $out_root"
+            count=$((count + 1))
+        done
+    done
+
+    echo "[modules] done: $count .ko file(s) in $out_root"
 }
 
 do_urootfs() {
@@ -129,7 +181,7 @@ do_run() {
         -kernel "$image" \
         -append "console=ttyAMA0 root=/dev/vda rw net.ifnames=0" \
         -drive if=none,file="$ROOTFS_IMG",format=raw,id=hd0 \
-        -netdev user,id=net0 \
+        -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
         -device virtio-net-pci,netdev=net0 \
         -device virtio-blk-pci,drive=hd0 \
         -device demo-pcie-ep
@@ -138,11 +190,12 @@ do_run() {
 [ $# -eq 1 ] || usage
 
 case "$1" in
-    kconfig) do_kconfig ;;
-    kernel) do_bkernel ;;
-    run)     do_run ;;
-    urootfs) do_urootfs ;;
-    *)       usage ;;
+    kconfig)  do_kconfig ;;
+    kernel)   do_bkernel ;;
+    modules)  do_bmodules ;;
+    run)      do_run ;;
+    urootfs)  do_urootfs ;;
+    *)        usage ;;
 esac
 
 
