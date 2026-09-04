@@ -29,8 +29,8 @@
 
 OBJECT_DECLARE_SIMPLE_TYPE(DemoPCIEEPState, DEMO_PCIE_EP)
 
-#define DEMO_PCIE_EP_VENDOR_ID       0x1234
-#define DEMO_PCIE_EP_DEVICE_ID       0x5678
+#define DEMO_PCIE_EP_VENDOR_ID       0x2026
+#define DEMO_PCIE_EP_DEVICE_ID       0x0904
 
 #define DEMO_PCIE_EP_BAR0_SIZE       0x1000
 
@@ -45,7 +45,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(DemoPCIEEPState, DEMO_PCIE_EP)
 #define REG_MAGIC                  0x014
 
 #define VERSION_VALUE              0x00010000
-#define DEVICE_ID_VALUE            0x12345678
+#define DEVICE_ID_VALUE            0x20260904
 #define MAGIC_VALUE                0x50434945  /* "PCIE" */
 
 #define CONTROL_ENABLE             BIT(0)
