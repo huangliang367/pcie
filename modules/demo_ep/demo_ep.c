@@ -5,12 +5,9 @@
 #define VENDOR_ID 0x2026
 #define DEVICE_ID 0x0904
 
-#define REG_VERSION 0x000
-#define REG_CONTROL 0x004
-#define REG_STATUS 0x008
-#define REG_SCRATCH 0x00C
-#define REG_DEVICE_ID 0x010
-#define REG_MAGIC 0x014
+#define REG_VERSION 	0x000
+#define REG_DEVICE_ID 	0x004
+#define REG_REVISION 	0x008
 
 struct demo_pcie_ep {
 	struct pci_dev *pdev;
@@ -32,9 +29,8 @@ static int demo_pcie_ep_probe(struct pci_dev *pdev, const struct pci_device_id *
 	struct demo_pcie_ep *ep;
 
 	u32 version;
-	u32 status;
 	u32 device_id;
-	u32 magic;
+	u32 revision;
 
 	int ret;
 
@@ -72,22 +68,13 @@ static int demo_pcie_ep_probe(struct pci_dev *pdev, const struct pci_device_id *
 	}
 
 	version = readl(ep->bar0 + REG_VERSION);
-	status = readl(ep->bar0 + REG_STATUS);
 	device_id = readl(ep->bar0 + REG_DEVICE_ID);
-	magic = readl(ep->bar0 + REG_MAGIC);
+	revision = readl(ep->bar0 + REG_REVISION);
 
 	dev_info(&pdev->dev, "VERSION = 0x%08x\n", version);
-	dev_info(&pdev->dev, "STATUS = 0x%08x\n", status);
 	dev_info(&pdev->dev, "DEVICE_ID = 0x%08x\n", device_id);
-	dev_info(&pdev->dev, "MAGIC = 0x%08x\n", magic);
+	dev_info(&pdev->dev, "REVISION = 0x%08x\n", revision);
 	
-	/** Test write register */
-	writel(0xdeadbeef, ep->bar0 + REG_SCRATCH);
-	dev_info(&pdev->dev, "SCRATCH = 0x%08x\n", readl(ep->bar0 + REG_SCRATCH));
-	
-	writel(1, ep->bar0 + REG_CONTROL);
-	dev_info(&pdev->dev, "CONTROL = 0x%08x\n", readl(ep->bar0 + REG_CONTROL));
-
 	return 0;
 
 release_region:

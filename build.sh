@@ -184,7 +184,8 @@ do_run() {
         -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
         -device virtio-net-pci,netdev=net0 \
         -device virtio-blk-pci,drive=hd0 \
-        -device demo-pcie-ep
+        -device demo-pcie-ep \
+		-D ${ROOT_DIR}/log/qemu-debug.log
 }
 
 [ $# -eq 1 ] || usage
