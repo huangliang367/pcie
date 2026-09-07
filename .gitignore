@@ -7,3 +7,4 @@ debian-build/images/
 qemu/.vscode-ctags
 .deepseek/
 .vscode-ctags*
+log/

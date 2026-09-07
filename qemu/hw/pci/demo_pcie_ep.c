@@ -17,157 +17,23 @@
 
 #include "qemu/osdep.h"
 
-#include "hw/pci/pci_bus.h"
-#include "hw/pci/pci_device.h"
+#include "hw/pci/demo_pcie_ep.h"
+#include "hw/pci/pcie.h"
+#include "hw/pci/msi.h"
 
-#include "qapi/error.h"
-#include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/log.h"
+#include "qemu/timer.h"
+
+#include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 
 #define TYPE_DEMO_PCIE_EP "demo-pcie-ep"
-
 OBJECT_DECLARE_SIMPLE_TYPE(DemoPCIEEPState, DEMO_PCIE_EP)
-
-#define DEMO_PCIE_EP_VENDOR_ID 0x2026
-#define DEMO_PCIE_EP_DEVICE_ID 0x0904
-
-#define DEMO_PCIE_EP_BAR0_SIZE 0x1000
-
-/*
- * BAR0 registers
- */
-#define REG_VERSION 0x000
-#define REG_DEVICE_ID 0x004
-#define REG_REVISION 0x008
-#define REG_CAPABILITY 0x00c
-
-#define REG_CONTROL 0x010
-#define REG_STATUS 0x014
-#define REG_RESET 0x018
-
-#define REG_IRQ_ENABLE 0x020
-#define REG_IRQ_STATUS 0x024
-
-#define REG_DOORBELL 0x030
-#define REG_DOORBELL_STATUS 0x034
-
-#define REG_DMA_ADDR_LO 0x040
-#define REG_DMA_ADDR_HI 0x044
-#define REG_DMA_LEN 0x048
-#define REG_DMA_CONTROL 0x04c
-#define REG_DMA_STATUS 0x050
-
-#define REG_SCRATCH0 0x100
-#define REG_SCRATCH1 0x104
-#define REG_SCRATCH2 0x108
-#define REG_SCRATCH3 0x10c
-
-/** constant register values */
-#define VERSION_VALUE 0x00010000
-#define DEVICE_ID_VALUE 0x20260904
-#define REVISION_VALUE 0x00000001
-
-#define CAP_DMA BIT(0)
-#define CAP_MSI BIT(1)
-#define CAP_MSIX BIT(2)
-
-/**
- * control register
- * bit0: enable
- * bit1: start
- * bit2: reset
- */
-#define CONTROL_ENABLE BIT(0)
-#define CONTROL_START BIT(1)
-#define CONTROL_RESET BIT(2)
-
-/**
- * status register
- */
-#define STATUS_READY BIT(0)
-#define STATUS_ENABLED BIT(1)
-#define STATUS_BUSY BIT(2)
-#define STATUS_ERROR BIT(3)
-
-/** irq */
-#define IRQ_DMA_DONE BIT(0)
-#define IRQ_DOORBELL BIT(1)
-#define IRQ_ERROR BIT(2)
-
-/** doorbell */
-#define DOORBELL_RX BIT(0)
-#define DOORBELL_TX BIT(1)
-#define DOORBELL_DMA BIT(2)
-
-/* DMA control */
-#define DMA_CONTROL_START BIT(0)
-#define DMA_CONTROL_DIR_READ BIT(1)
-#define DMA_CONTROL_IRQ_ENABLE BIT(2)
-
-/** DMA status */
-#define DMA_STATUS_IDLE 0
-#define DMA_STATUS_BUSY BIT(0)
-#define DMA_STATUS_DONE BIT(1)
-#define DMA_STATUS_ERROR BIT(2)
-
-/** reset */
-#define RESET_DEVICE BIT(0)
-#define RESET_DMA BIT(1)
-#define RESET_IRQ BIT(2)
-
-typedef struct DemoPCIEEPState {
-  PCIDevice parent_obj;
-
-  /*
-   * BAR0
-   */
-  MemoryRegion bar0;
-
-  /*
-   * control /status
-   */
-  uint32_t control;
-  uint32_t status;
-
-  /** irq */
-  uint32_t irq_enable;
-  uint32_t irq_status;
-
-  /** doorbell */
-  uint32_t doorbell_status;
-
-  /** dma */
-  uint64_t dma_addr;
-  uint64_t dma_len;
-
-  uint64_t dma_control;
-  uint64_t dma_status;
-
-  /** scratch */
-  uint32_t scratch0;
-  uint32_t scratch1;
-  uint32_t scratch2;
-  uint32_t scratch3;
-} DemoPCIEEPState;
 
 /** device reset */
 static void demo_pcie_ep_reset_devcie(DemoPCIEEPState *s) {
   qemu_log_mask(LOG_TRACE, TYPE_DEMO_PCIE_EP ": device reset");
-
-  s->control = 0;
-  s->status = STATUS_READY;
-  s->irq_enable = 0;
-  s->irq_status = 0;
-  s->doorbell_status = 0;
-  s->dma_addr = 0;
-  s->dma_len = 0;
-  s->dma_control = 0;
-  s->dma_status = DMA_STATUS_IDLE;
-
-  s->scratch0 = 0;
-  s->scratch1 = 0;
-  s->scratch2 = 0;
-  s->scratch3 = 0;
 }
 
 /*
@@ -176,13 +42,13 @@ static void demo_pcie_ep_reset_devcie(DemoPCIEEPState *s) {
 static uint64_t demo_pcie_ep_read(void *opaque, hwaddr addr, unsigned size) {
   DemoPCIEEPState *s = opaque;
 
-  uint64_t value = 0;
+  uint32_t value = 0;
 
   if (size != 4) {
     qemu_log_mask(LOG_GUEST_ERROR, TYPE_DEMO_PCIE_EP
                   ": ivalid read size = %u, addr = 0x%" HWADDR_PRIx "\n",
 				size, addr);
-    return 0;
+    return 0xffffffff;
   }
 
   switch (addr) {
@@ -205,10 +71,10 @@ static uint64_t demo_pcie_ep_read(void *opaque, hwaddr addr, unsigned size) {
 
   /** control */
   case REG_CONTROL:
-    value = s->control;
+    value = s->enabled ? CONTROL_ENABLE : 0;
     break;
   case REG_STATUS:
-    value = s->status;
+    value = s->enabled ? 1 : 0;
     break;
 
   /** reset is write-only*/
@@ -233,7 +99,7 @@ static uint64_t demo_pcie_ep_read(void *opaque, hwaddr addr, unsigned size) {
     value = 0;
     break;
   case REG_DOORBELL_STATUS:
-    value = s->doorbell_status;
+    value = s->regs[REG_DOORBELL_STATUS / 4];
     break;
 
   /** DMA */
@@ -243,25 +109,23 @@ static uint64_t demo_pcie_ep_read(void *opaque, hwaddr addr, unsigned size) {
   case REG_DMA_ADDR_HI:
     value = (uint32_t)(s->dma_addr >> 32);
     break;
+  case REG_DMA_LEN:
+    value = s->dma_len;
+    break;
   case REG_DMA_CONTROL:
     value = s->dma_control;
     break;
   case REG_DMA_STATUS:
     value = s->dma_status;
     break;
+  case REG_DMA_CHECKSUM:
+    value = s->dma_checksum;
+    break;
 
   /** scratch */
   case REG_SCRATCH0:
-    value = s->scratch0;
-    break;
   case REG_SCRATCH1:
-    value = s->scratch1;
-    break;
-  case REG_SCRATCH2:
-    value = s->scratch2;
-    break;
-  case REG_SCRATCH3:
-    value = s->scratch3;
+    value = s->regs[addr / 4];
     break;
   /** invalid register */
   default:
@@ -275,10 +139,32 @@ static uint64_t demo_pcie_ep_read(void *opaque, hwaddr addr, unsigned size) {
 
   qemu_log_mask(LOG_TRACE,
                 TYPE_DEMO_PCIE_EP ": BAR0 READ "
-                                  " addr=0x%" HWADDR_PRIx " value=0x%" PRIx64 "\n",
+                                  " addr=0x%" HWADDR_PRIx " value=0x%" PRIx32 "\n",
                 addr, value);
 
   return value;
+}
+
+static void demo_pcie_ep_dma_complete(void *opaque);
+
+static void demo_pcie_ep_dma_start(DemoPCIEEPState *s)
+{
+  if (!s->enabled) {
+	s->dma_status = DMA_STATUS_ERROR;
+	return;
+  }
+
+  if ((s->dma_len == 0) || (s->dma_len > 4096)) {
+	s->dma_status = DMA_STATUS_ERROR;
+	return;
+  }
+
+  if (s->dma_status & DMA_STATUS_BUSY) {
+	return;
+  }
+
+  s->dma_status = DMA_STATUS_BUSY;
+  timer_mod_ns(s->dma_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
 }
 
 /*
@@ -323,19 +209,7 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
    * --------------------------------------------------------
    */
   case REG_CONTROL:
-    /*
-     * Only defined bits are accepted.
-     */
-    s->control = value & (CONTROL_ENABLE | CONTROL_START);
-    if (s->control & CONTROL_ENABLE) {
-      s->status |= STATUS_ENABLED;
-    } else {
-      s->status &= ~STATUS_ENABLED;
-    }
-
-    if (s->control & CONTROL_START) {
-      s->status |= STATUS_BUSY;
-    }
+	s->enabled = value & CONTROL_ENABLE;
     break;
   /*
    * --------------------------------------------------------
@@ -352,21 +226,9 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
    * --------------------------------------------------------
    */
   case REG_RESET:
-    if (value & RESET_DEVICE) {
-      demo_pcie_ep_reset_devcie(s);
-      break;
-    }
-
-    if (value & RESET_DMA) {
-      s->dma_addr = 0;
-      s->dma_len = 0;
-      s->dma_control = 0;
-      s->dma_status = DMA_STATUS_IDLE;
-    }
-
-    if (value & RESET_IRQ) {
-      s->irq_enable = 0;
-      s->irq_status = 0;
+    if (value & 1) {
+        demo_pcie_ep_reset_devcie(s);
+        s->enabled = false;
     }
     break;
   /*
@@ -375,7 +237,7 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
    * --------------------------------------------------------
    */
   case REG_IRQ_ENABLE:
-    s->irq_enable = value & (IRQ_DMA_DONE | IRQ_DOORBELL | IRQ_ERROR);
+    s->irq_enable = value;
     break;
   /*
    * --------------------------------------------------------
@@ -396,33 +258,7 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
    * --------------------------------------------------------
    */
   case REG_DOORBELL:
-    /*
-     * Guest writes a doorbell.
-     */
-    if (value & DOORBELL_RX) {
-      s->doorbell_status |= DOORBELL_RX;
-      s->irq_status |= IRQ_DOORBELL;
-    }
-
-    if (value & DOORBELL_TX) {
-      s->doorbell_status |= DOORBELL_TX;
-      s->irq_status |= IRQ_DOORBELL;
-    }
-
-    if (value & DOORBELL_DMA) {
-      s->doorbell_status |= DOORBELL_DMA;
-      s->irq_status |= IRQ_DMA_DONE;
-    }
-    break;
-  /*
-   * --------------------------------------------------------
-   * DOORBELL STATUS
-   *
-   * Write 1 to clear.
-   * --------------------------------------------------------
-   */
-  case REG_DOORBELL_STATUS:
-    s->doorbell_status &= ~value;
+    s->regs[REG_DOORBELL_STATUS / 4] = value;
     break;
   /*
    * --------------------------------------------------------
@@ -430,7 +266,7 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
    * --------------------------------------------------------
    */
   case REG_DMA_ADDR_LO:
-    s->dma_addr = (s->dma_addr & 0xffffffff00000000ULL) | (uint64_t)value;
+    s->dma_addr = (s->dma_addr & 0xffffffff00000000ULL) | (uint32_t)value;
     break;
 
   case REG_DMA_ADDR_HI:
@@ -451,23 +287,10 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
    * --------------------------------------------------------
    */
   case REG_DMA_CONTROL:
-    s->dma_control = value & (DMA_CONTROL_START | DMA_CONTROL_DIR_READ |
-                              DMA_CONTROL_IRQ_ENABLE);
-
-    if (value & DMA_CONTROL_START) {
-      s->dma_status = DMA_STATUS_BUSY;
-      s->status |= STATUS_BUSY;
-      /*
-       * Lab 3:
-       *
-       * We don't actually perform DMA yet.
-       *
-       * Lab 4 will call:
-       *
-       *     my_pcie_ep_start_dma(s);
-       *
-       */
-    }
+	s->dma_control = value;
+	if (value & DMA_CONTROL_START) {
+		demo_pcie_ep_dma_start(s);
+	}
     break;
 
   /*
@@ -486,27 +309,8 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
      */
 
   case REG_SCRATCH0:
-
-    s->scratch0 = value;
-
-    break;
-
   case REG_SCRATCH1:
-
-    s->scratch1 = value;
-
-    break;
-
-  case REG_SCRATCH2:
-
-    s->scratch2 = value;
-
-    break;
-
-  case REG_SCRATCH3:
-
-    s->scratch3 = value;
-
+	s->regs[addr / 4] = value;
     break;
 
     /*
@@ -516,7 +320,6 @@ static void demo_pcie_ep_write(void *opaque, hwaddr addr, uint64_t val,
      */
 
   default:
-
     qemu_log_mask(LOG_GUEST_ERROR,
                   TYPE_DEMO_PCIE_EP ": invalid write "
                                     "addr=0x%" HWADDR_PRIx " value=0x%08x\n",
@@ -540,6 +343,45 @@ static const MemoryRegionOps demo_pcie_ep_ops = {
         },
 };
 
+static void demo_pcie_ep_dma_complete(void *opaque)
+{
+	DemoPCIEEPState *s = opaque;
+	uint8_t *buf;
+	uint32_t i;
+
+	if (!(s->dma_status & DMA_STATUS_BUSY)) {
+      return;
+	}
+
+	buf = g_malloc(s->dma_len);
+	if (s->dma_control & DMA_CONTROL_MEM_TO_DEV) {
+		MemTxResult result;
+		result = pci_dma_read(&s->parent_obj, s->dma_addr, buf, s->dma_len);
+		if (result != MEMTX_OK) {
+			s->dma_status = DMA_STATUS_ERROR;
+			g_free(buf);
+			return;
+		}
+
+		s->dma_checksum = 0;
+		for (i = 0; i <s->dma_len; i++) {
+			s->dma_checksum += buf[i];
+		}
+	} else {
+		MemTxResult result;
+		result = pci_dma_write(&s->parent_obj, s->dma_addr, buf, s->dma_len);
+		if (result != MEMTX_OK) {
+			s->dma_status = DMA_STATUS_ERROR;
+			g_free(buf);
+			return;
+		}
+	}
+
+	g_free(buf);
+	s->dma_status = DMA_STATUS_DONE;
+	s->irq_status |= IRQ_DMA_DONE;
+}
+
 /*
  * PCI device realize
  */
@@ -553,6 +395,7 @@ static void demo_pcie_ep_realize(PCIDevice *pdev, Error **errp) {
 
   pci_config_set_device_id(pdev->config, DEMO_PCIE_EP_DEVICE_ID);
 
+  pci_config_set_revision(pdev->config, 0x01);
   /*
    * Generic / experimental device class
    *
@@ -571,7 +414,7 @@ static void demo_pcie_ep_realize(PCIDevice *pdev, Error **errp) {
 
   pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
 
-  demo_pcie_ep_reset_devcie(s);
+  s->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, demo_pcie_ep_dma_complete, s);
 
   qemu_log_mask(LOG_TRACE, TYPE_DEMO_PCIE_EP ": realize\n");
 }
@@ -580,29 +423,14 @@ static void demo_pcie_ep_realize(PCIDevice *pdev, Error **errp) {
  * PCI device exit
  */
 static void demo_pcie_ep_exit(PCIDevice *pdev) {
+	DemoPCIEEPState *s = DEMO_PCIE_EP(pdev);
+
+	if (s->dma_timer) {
+		timer_del(s->dma_timer);
+		timer_free(s->dma_timer);
+		s->dma_timer = NULL;
+	}
 	qemu_log_mask(LOG_TRACE, TYPE_DEMO_PCIE_EP ": exit\n");
-}
-
-/*
- * Instance initialization
- */
-static void demo_pcie_ep_init(Object *obj) {
-  DemoPCIEEPState *s = DEMO_PCIE_EP(obj);
-
-	s->control = 0;
-	s->status = 0;
-	s->irq_enable = 0;
-	s->irq_status = 0;
-	s->doorbell_status = 0;
-	s->dma_addr = 0;
-	s->dma_len = 0;
-	s->dma_control = 0;
-	s->dma_status = DMA_STATUS_IDLE;
-	s->scratch0 = 0;
-	s->scratch0 = 0;
-	s->scratch1 = 0;
-	s->scratch2 = 0;
-	s->scratch3 = 0;
 }
 
 /*
@@ -615,6 +443,7 @@ static void demo_pcie_ep_class_init(ObjectClass *klass, const void *data) {
   k->realize = demo_pcie_ep_realize;
   k->exit = demo_pcie_ep_exit;
 
+  set_bit(DEVICE_CATEGORY_MISC, dc->categories);
   /*
    * No hotplug for this lab device.
    */
@@ -628,8 +457,6 @@ static const TypeInfo demo_pcie_ep_info = {
     .name = TYPE_DEMO_PCIE_EP,
     .parent = TYPE_PCI_DEVICE,
     .instance_size = sizeof(DemoPCIEEPState),
-
-    .instance_init = demo_pcie_ep_init,
     .class_init = demo_pcie_ep_class_init,
 
     .interfaces =
