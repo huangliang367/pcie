@@ -369,6 +369,11 @@ static void demo_pcie_ep_dma_complete(void *opaque)
 		}
 	} else {
 		MemTxResult result;
+
+		for (i = 0; i < s->dma_len; i++) {
+			buf[i] = i & 0xff;
+		}
+
 		result = pci_dma_write(&s->parent_obj, s->dma_addr, buf, s->dma_len);
 		if (result != MEMTX_OK) {
 			s->dma_status = DMA_STATUS_ERROR;

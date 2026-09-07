@@ -1,18 +1,10 @@
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
-
-#define VENDOR_ID 0x2026
-#define DEVICE_ID 0x0904
-
-#define REG_VERSION 	0x000
-#define REG_DEVICE_ID 	0x004
-#define REG_REVISION 	0x008
-
-struct demo_pcie_ep {
-	struct pci_dev *pdev;
-	void __iomem *bar0;
-};
+#include <linux/delay.h>
+#include <linux/slab.h>
+#include "demo_ep.h"
 
 static const struct pci_device_id demo_pcie_ep_ids[] = {
 	{ PCI_DEVICE(VENDOR_ID, DEVICE_ID) },
@@ -24,15 +16,134 @@ MODULE_DEVICE_TABLE(
 	demo_pcie_ep_ids
 );
 
+static inline u32 demo_pcie_ep_readl(struct demo_pcie_ep *ep, u32 reg)
+{
+	return readl(ep->bar0 + reg);
+}
+
+static inline void demo_pcie_ep_writel(struct demo_pcie_ep *ep, u32 reg, u32 value)
+{
+	writel(value, ep->bar0 + reg);
+}
+
+static void demo_print_dma_info(struct demo_pcie_ep *ep)
+{
+	dev_info(&ep->pdev->dev, "dma_cpu_addr = %p\n", ep->dma_cpu_addr);
+	dev_info(&ep->pdev->dev, "dma_handle = 0x%08x\n", ep->dma_handle);
+	dev_info(&ep->pdev->dev, "dma_size = %d\n", ep->dma_size);
+}
+
+
+static void demo_program_dma_addr(struct demo_pcie_ep *ep, dma_addr_t addr)
+{
+	demo_pcie_ep_writel(ep, REG_DMA_ADDR_LO, lower_32_bits(addr));
+	demo_pcie_ep_writel(ep, REG_DMA_ADDR_HI, upper_32_bits(addr));
+}
+
+static int demo_wait_dma(struct demo_pcie_ep *ep)
+{
+	int timeout = 1000;
+
+	while (timeout--) {
+		u32 status;
+
+		status = demo_pcie_ep_readl(ep, REG_DMA_STATUS);
+
+		if (status & DMA_STATUS_ERROR) {
+			dev_err(&ep->pdev->dev, "DMA error, status = 0x%08x\n", status);
+			return -EIO;
+		}
+
+		if (status & DMA_STATUS_DONE) {
+			return 0;
+		}
+		usleep_range(1000, 2000);
+	}
+
+	dev_err(&ep->pdev->dev, "DMA timeout\n");
+
+	return -ETIMEDOUT;
+}
+
+static int demo_dma_device_to_memory(struct demo_pcie_ep *ep)
+{
+	size_t i;
+	int ret;
+
+	dev_info(&ep->pdev->dev, "DMA test: DEVICE -> MEMORY\n");
+
+	memset(ep->dma_cpu_addr, 0x0, ep->dma_size);
+	demo_program_dma_addr(ep, ep->dma_handle);
+	demo_pcie_ep_writel(ep, REG_DMA_LEN, ep->dma_size);
+	demo_pcie_ep_writel(ep, REG_DMA_CONTROL, DMA_CONTROL_START);
+
+	ret = demo_wait_dma(ep);
+	if (ret) {
+		return ret;
+	}
+
+	for (i = 0; i < ep->dma_size; i++) {
+		u8 expected = i & 0xff;
+		u8 actual;
+
+		actual = ((u8 *)ep->dma_cpu_addr)[i];
+		if (actual != expected) {
+			dev_err(&ep->pdev->dev, "DMA test: DEVICE -> MEMORY failed, i = %d, expected = 0x%02x, actual = 0x%02x\n", i, expected, actual);
+			return -EIO;
+		}
+	}
+
+	dev_info(&ep->pdev->dev, "DMA test: DEVICE -> MEMORY passed\n");
+
+	return 0;
+}
+
+static int demo_dma_memory_to_device(struct demo_pcie_ep *ep)
+{
+	size_t i;
+	u32 checksum = 0;
+	u32 device_checksum;
+	int ret;
+
+	dev_info(&ep->pdev->dev, "DMA test: MEMORY -> DEVICE\n");
+
+	for (i = 0; i < ep->dma_size; i++) {
+		((u8 *)ep->dma_cpu_addr)[i] = i & 0xff;
+		checksum += (i & 0xff);
+	}
+
+	wmb();
+	demo_program_dma_addr(ep, ep->dma_handle);
+	demo_pcie_ep_writel(ep, REG_DMA_LEN, ep->dma_size);
+	demo_pcie_ep_writel(ep, REG_DMA_CONTROL, DMA_CONTROL_START | DMA_CONTROL_MEM_TO_DEV);
+
+	ret = demo_wait_dma(ep);
+	if (ret) {
+		return ret;
+	}
+
+	device_checksum = demo_pcie_ep_readl(ep, REG_DMA_CHECKSUM);
+	dev_info(&ep->pdev->dev, "DMA checksum: device = 0x%08x, expected = 0x%08x\n", device_checksum, checksum);
+
+	if (device_checksum != checksum) {
+		dev_err(&ep->pdev->dev, "DMA checksum mismatch\n");
+		return -EIO;
+	}
+
+	dev_info(&ep->pdev->dev, "DMA MEMORY -> DEVICE PASS\n");
+
+	return 0;
+}
+
 static int demo_pcie_ep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct demo_pcie_ep *ep;
+	int ret;
 
 	u32 version;
 	u32 device_id;
 	u32 revision;
-
-	int ret;
+	u32 capability;
 
 	dev_info(&pdev->dev, "demo pcie ep probe\n");
 
@@ -50,10 +161,21 @@ static int demo_pcie_ep_probe(struct pci_dev *pdev, const struct pci_device_id *
 		return ret;
 	}
 
-	ret = pci_request_region(
+	pci_set_master(pdev);
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret) {
+		dev_info(&pdev->dev, "64bit DMA not available, try 32bit\n");
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		if (ret) {
+			dev_err(&pdev->dev, "32bit DMA not available\n");
+			return ret;
+		}
+	}
+
+	ret = pcim_iomap_regions(
 		pdev,
-		0,
-		"demo_pcie_ep"
+		BIT(0),
+		DRIVER_NAME
 	);
 
 	if (ret) {
@@ -61,21 +183,48 @@ static int demo_pcie_ep_probe(struct pci_dev *pdev, const struct pci_device_id *
 		goto disable_device;
 	}
 
-	ep->bar0 = pci_iomap(pdev, 0, 0);
+	ep->bar0 = pcim_iomap_table(pdev)[0];
 	if (!ep->bar0) {
 		dev_err(&pdev->dev, "pci_iomap failed\n");
 		goto release_region;
 	}
 
-	version = readl(ep->bar0 + REG_VERSION);
-	device_id = readl(ep->bar0 + REG_DEVICE_ID);
-	revision = readl(ep->bar0 + REG_REVISION);
+	version = demo_pcie_ep_readl(ep, REG_VERSION);
+	revision = demo_pcie_ep_readl(ep, REG_REVISION);
+	capability = demo_pcie_ep_readl(ep, REG_CAPABILITY);
 
 	dev_info(&pdev->dev, "VERSION = 0x%08x\n", version);
-	dev_info(&pdev->dev, "DEVICE_ID = 0x%08x\n", device_id);
 	dev_info(&pdev->dev, "REVISION = 0x%08x\n", revision);
+	dev_info(&pdev->dev, "CAPABILITY = 0x%08x\n", capability);
 	
+	demo_pcie_ep_writel(ep, REG_CONTROL, CONTROL_ENABLE);
+	
+	ep->dma_size = DMA_BUF_SIZE;
+	ep->dma_cpu_addr = dma_alloc_coherent(&pdev->dev, ep->dma_size, &ep->dma_handle, GFP_KERNEL);
+	if (!ep->dma_cpu_addr) {
+		dev_err(&pdev->dev, "dma_alloc_coherent failed\n");
+		goto release_region;
+	}
+	demo_print_dma_info(ep);
+
+	ret = demo_dma_device_to_memory(ep);
+	if (ret) {
+		goto dma_err;
+	}
+	dev_info(&pdev->dev, "DMA test: DEVICE -> MEMORY passed\n");
+
+	ret = demo_dma_memory_to_device(ep);
+	if (ret) {
+		goto dma_err;
+	}
+	dev_info(&pdev->dev, "DMA test: MEMORY -> DEVICE passed\n");
+
 	return 0;
+
+dma_err:
+	dma_free_coherent(&pdev->dev, ep->dma_size, ep->dma_cpu_addr, ep->dma_handle);
+	ep->dma_cpu_addr = NULL;
+	ep->dma_handle = 0;
 
 release_region:
 	pci_release_region(pdev, 0);
