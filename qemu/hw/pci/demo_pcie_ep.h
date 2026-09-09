@@ -101,6 +101,7 @@ typedef struct DemoPCIEEPState {
   MemoryRegion bar0;
   QEMUTimer *dma_timer;
   uint32_t regs[DEMO_PCIE_EP_BAR0_SIZE / sizeof(uint32_t)];
+  
   uint64_t dma_addr;
   uint32_t dma_len;
   uint32_t dma_control;

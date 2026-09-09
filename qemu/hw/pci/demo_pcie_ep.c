@@ -104,7 +104,7 @@ static uint64_t demo_pcie_ep_read(void *opaque, hwaddr addr, unsigned size) {
 
   /** DMA */
   case REG_DMA_ADDR_LO:
-    value = (uint32_t)(s->dma_addr & 0xFFFFFFFF);
+    value = (uint32_t)(s->dma_addr & 0xFFFFFFFFULL);
     break;
   case REG_DMA_ADDR_HI:
     value = (uint32_t)(s->dma_addr >> 32);
@@ -144,6 +144,35 @@ static uint64_t demo_pcie_ep_read(void *opaque, hwaddr addr, unsigned size) {
 
   return value;
 }
+
+static void demo_pcie_raise_irq(DemoPCIEEPState *s, uint32_t irq)
+{
+	PCIDevice *pdev = PCI_DEVICE(s);
+
+	s->irq_status |= irq;
+
+	if (!(s->irq_enable & irq)) {
+		return;
+	}
+
+	if(msi_enabled(pdev)) {
+		qemu_log_mask(LOG_TRACE,
+		"demo-pcie-ep: MSInotify vector 0\n");
+		msi_notify(pdev, 0);
+	} else {
+		pci_set_irq(pdev, 1);
+	}
+}
+
+static void demo_pcie_ep_clear_irq(DemoPCIEEPState *s, uint32_t irq)
+{
+	PCIDevice *pdev = PCI_DEVICE(s);
+
+	if (!s->irq_status && !msi_enabled(pdev)) {
+		pci_set_irq(pdev, 0);
+	}
+}
+
 
 static void demo_pcie_ep_dma_complete(void *opaque);
 
@@ -385,6 +414,7 @@ static void demo_pcie_ep_dma_complete(void *opaque)
 	g_free(buf);
 	s->dma_status = DMA_STATUS_DONE;
 	s->irq_status |= IRQ_DMA_DONE;
+	demo_pcie_raise_irq(s, IRQ_DMA_DONE);
 }
 
 /*
@@ -392,7 +422,8 @@ static void demo_pcie_ep_dma_complete(void *opaque)
  */
 static void demo_pcie_ep_realize(PCIDevice *pdev, Error **errp) {
   DemoPCIEEPState *s = DEMO_PCIE_EP(pdev);
-
+	Error *local_err = NULL;
+	int ret = 0;
   /*
    * PCI Config Space
    */
@@ -408,7 +439,15 @@ static void demo_pcie_ep_realize(PCIDevice *pdev, Error **errp) {
    * Subclass  = 0x00
    */
   pci_config_set_class(pdev->config, PCI_CLASS_OTHERS);
+  pci_config_set_interrupt_pin(pdev->config, 1);
 
+  pcie_endpoint_cap_init(pdev, 0x60);
+
+  ret = msi_init(pdev, 0xa0, 1, true, true, &local_err);
+  if (ret < 0) {
+	error_propagate(errp, local_err);
+	return;
+  }
   /*
    * BAR0
    *

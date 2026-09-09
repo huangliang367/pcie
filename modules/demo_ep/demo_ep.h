@@ -35,6 +35,11 @@
 
 #define CONTROL_ENABLE	BIT(0)
 
+/*
+ * IRQ
+ */
+#define IRQ_DMA_DONE            BIT(0)
+
 #define DMA_CONTROL_START	BIT(0)
 #define DMA_CONTROL_MEM_TO_DEV	BIT(1)
 
@@ -50,6 +55,8 @@ struct demo_pcie_ep {
 	void *dma_cpu_addr;
 	dma_addr_t dma_handle;
 	size_t dma_size;
+	struct completion dma_completion;
+	int irq;
 };
 
 #endif /* _DEMO_EP_H */

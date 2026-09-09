@@ -26,6 +26,27 @@ static inline void demo_pcie_ep_writel(struct demo_pcie_ep *ep, u32 reg, u32 val
 	writel(value, ep->bar0 + reg);
 }
 
+static irqreturn_t demo_pcie_ep_irq(int irq, void *data)
+{
+	struct demo_pcie_ep *ep = data;
+	u32 irq_status;
+	u32 dma_status;
+
+	irq_status = demo_pcie_ep_readl(ep, REG_IRQ_STATUS);
+	if (!(irq_status & IRQ_DMA_DONE)) {
+		return IRQ_NONE;
+	}
+
+	dma_status = demo_pcie_ep_readl(ep, REG_DMA_STATUS);
+	dev_info(&ep->pdev->dev, "IRQ: irq_status = 0x%08x, dma_status = 0x%08x\n", irq_status, dma_status);
+
+	demo_pcie_ep_writel(ep, REG_IRQ_STATUS, IRQ_DMA_DONE);
+
+	complete(&ep->dma_completion);
+
+	return IRQ_HANDLED;
+}
+
 static void demo_print_dma_info(struct demo_pcie_ep *ep)
 {
 	dev_info(&ep->pdev->dev, "dma_cpu_addr = %p\n", ep->dma_cpu_addr);
@@ -43,26 +64,27 @@ static void demo_program_dma_addr(struct demo_pcie_ep *ep, dma_addr_t addr)
 static int demo_wait_dma(struct demo_pcie_ep *ep)
 {
 	int timeout = 1000;
+	u32 status;
 
-	while (timeout--) {
-		u32 status;
-
-		status = demo_pcie_ep_readl(ep, REG_DMA_STATUS);
-
-		if (status & DMA_STATUS_ERROR) {
-			dev_err(&ep->pdev->dev, "DMA error, status = 0x%08x\n", status);
-			return -EIO;
-		}
-
-		if (status & DMA_STATUS_DONE) {
-			return 0;
-		}
-		usleep_range(1000, 2000);
+	timeout = wait_for_completion_timeout(&ep->dma_completion, msecs_to_jiffies(1000));
+	if (!timeout) {
+		dev_err(&ep->pdev->dev, "DMA timeout\n");
+		return -ETIMEDOUT;
 	}
 
-	dev_err(&ep->pdev->dev, "DMA timeout\n");
+	status = demo_pcie_ep_readl(ep, REG_DMA_STATUS);
+	if (status & DMA_STATUS_ERROR) {
+		dev_err(&ep->pdev->dev, "DMA error, status = 0x%08x\n", status);
+		return -EIO;
+	}
 
-	return -ETIMEDOUT;
+	if (!(status & DMA_STATUS_DONE)) {
+		dev_err(&ep->pdev->dev, "DMA not done, status = 0x%08x\n", status);
+		return -EIO;
+	}
+	
+
+	return 0;
 }
 
 static int demo_dma_device_to_memory(struct demo_pcie_ep *ep)
@@ -73,8 +95,11 @@ static int demo_dma_device_to_memory(struct demo_pcie_ep *ep)
 	dev_info(&ep->pdev->dev, "DMA test: DEVICE -> MEMORY\n");
 
 	memset(ep->dma_cpu_addr, 0x0, ep->dma_size);
+	reinit_completion(&ep->dma_completion);
+
 	demo_program_dma_addr(ep, ep->dma_handle);
 	demo_pcie_ep_writel(ep, REG_DMA_LEN, ep->dma_size);
+	demo_pcie_ep_writel(ep, REG_IRQ_ENABLE, IRQ_DMA_DONE);
 	demo_pcie_ep_writel(ep, REG_DMA_CONTROL, DMA_CONTROL_START);
 
 	ret = demo_wait_dma(ep);
@@ -113,6 +138,8 @@ static int demo_dma_memory_to_device(struct demo_pcie_ep *ep)
 	}
 
 	wmb();
+	reinit_completion(&ep->dma_completion);
+
 	demo_program_dma_addr(ep, ep->dma_handle);
 	demo_pcie_ep_writel(ep, REG_DMA_LEN, ep->dma_size);
 	demo_pcie_ep_writel(ep, REG_DMA_CONTROL, DMA_CONTROL_START | DMA_CONTROL_MEM_TO_DEV);
@@ -138,6 +165,7 @@ static int demo_dma_memory_to_device(struct demo_pcie_ep *ep)
 static int demo_pcie_ep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct demo_pcie_ep *ep;
+	unsigned int nr_vecs;
 	int ret;
 
 	u32 version;
@@ -197,6 +225,24 @@ static int demo_pcie_ep_probe(struct pci_dev *pdev, const struct pci_device_id *
 	dev_info(&pdev->dev, "REVISION = 0x%08x\n", revision);
 	dev_info(&pdev->dev, "CAPABILITY = 0x%08x\n", capability);
 	
+	nr_vecs = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+	if ((int)nr_vecs < 0) {
+		dev_err(&pdev->dev, "pci_alloc_irq_vectors failed: %d\n", nr_vecs);
+		return nr_vecs;
+	}
+	dev_info(&pdev->dev, "MSI vectors = %u\n", nr_vecs);
+
+	ep->irq = pci_irq_vector(pdev, 0);
+	dev_info(&pdev->dev, "MSI IRQ = %u\n", ep->irq);	
+
+	init_completion(&ep->dma_completion);
+	ret = request_irq(ep->irq, demo_pcie_ep_irq, 0, DRIVER_NAME, ep);
+	if (ret) {
+		dev_err(&pdev->dev, "request_irq failed: %d\n", ret);
+		pci_free_irq_vectors(pdev);
+		return ret;
+	}
+
 	demo_pcie_ep_writel(ep, REG_CONTROL, CONTROL_ENABLE);
 	
 	ep->dma_size = DMA_BUF_SIZE;
